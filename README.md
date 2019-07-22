@@ -1,2 +1,6 @@
 # OzSingleCells_Challenge_2019
 data and analysis for OzSingleCells Computational Challenge: https://sydneybiox.github.io/SingleCellsChallenge2019/
+
+## A new method to compare heterogeneity in multi-omic data
+
+The development of single cell multi-omic approaches allows the concurrent measurement in multiple levels of the same cell. Clustering can be performed for each measurement and compared to assess the cell identity. However, there is no method to explore the difference in heterogeneity between different omic data, which might contain critical information. Here I introduce a new method to compare the heterogeneity of different omic data by using multi-resolution clustering from the Seurat package. The clustering assignment between different omics were compared using the clustering entropy metrics that I developed in previous study and result can be visualized by one-sense UMAP dimensionality reduction. Applying this approach in CITE-seq data, I found cells that are similar in epitopes but heterogeneous in their transcriptomes and vice versa. Following analysis of genes and surface markers that responsible for the discrepancy suggest they might be cancer cells. This study highlighted that the gene expression in metastatic lymph node are transcriptionally heterogeneous.

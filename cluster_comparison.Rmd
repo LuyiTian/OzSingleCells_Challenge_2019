@@ -1,0 +1,398 @@
+---
+title: "compare clustering results between RNA and ADT"
+output: html_notebook
+author: Luyi Tian
+---
+
+
+
+```{r,warning=FALSE,message=FALSE}
+library(Seurat)
+library(ggplot2)
+library(pheatmap)
+library(umap)
+library(dplyr)
+library(GGally)
+library(ggExtra)
+library(clustree)
+library(RColorBrewer)
+getPalette = colorRampPalette(brewer.pal(8, "Set2"))
+getPalette1 = colorRampPalette(brewer.pal(9, "Set1"))
+citeCells_qc = readRDS("data/citeCells_qc.Rds")
+```
+
+# multi-level clustering on RNA data
+
+```{r}
+if (any(grepl("SCT_snn_res.",colnames(citeCells_qc@meta.data)))){
+  citeCells_qc@meta.data = citeCells_qc@meta.data[,!grepl("SCT_snn_res.",colnames(citeCells_qc@meta.data))]
+}
+citeCells_qc <- RunPCA(citeCells_qc, verbose = FALSE)
+citeCells_qc <- RunUMAP(citeCells_qc, dims = 1:30, verbose = FALSE)
+citeCells_qc <- FindNeighbors(citeCells_qc, dims = 1:30, verbose = FALSE)
+reso_used = c(0.1,0.4,0.8,1.2,1.8,2.4)
+for (re in reso_used) {
+  citeCells_qc <- FindClusters(citeCells_qc, verbose = FALSE,resolution=re)
+}
+```
+
+```{r}
+DimPlot(citeCells_qc,group.by = "SCT_snn_res.1.2",cols = getPalette(nlevels(citeCells_qc$SCT_snn_res.1.2)), label=TRUE)+NoLegend()
+```
+
+```{r}
+ggsave(filename = "figs/umap_clustering_rna.pdf",width = 5,height = 5)
+```
+
+
+```{r,fig.height=7,fig.width=7}
+clustree(citeCells_qc, prefix = "SCT_snn_res.",show_axis = T)
+```
+
+```{r}
+pdf("figs/cluster_tree_rna.pdf")
+clustree(citeCells_qc, prefix = "SCT_snn_res.",show_axis = T)
+dev.off()
+```
+
+# multi-level clustering on ADT data
+
+```{r}
+citeCells_cit = citeCells_qc
+citeCells_cit$RNA_clusters = citeCells_cit$seurat_clusters
+DefaultAssay(citeCells_cit) <- "ADT"
+citeCells_cit <- RunPCA(citeCells_cit, features = rownames(citeCells_cit),verbose = FALSE)
+citeCells_cit <- RunUMAP(citeCells_cit,dim=1:20 , assay = "ADT")
+citeCells_cit <- FindNeighbors(citeCells_cit)
+```
+
+
+```{r}
+if (any(grepl("ADT_snn_res.",colnames(citeCells_cit@meta.data)))){
+  citeCells_cit@meta.data = citeCells_cit@meta.data[,!grepl("SCT_snn_res.",colnames(citeCells_cit@meta.data))]
+}
+citeCells_cit <- RunPCA(citeCells_cit, features = rownames(citeCells_cit), verbose = FALSE)
+citeCells_cit <- RunUMAP(citeCells_cit, dims = 1:20, verbose = FALSE)
+citeCells_cit <- FindNeighbors(citeCells_cit, dims = 1:20, verbose = FALSE)
+reso_used = c(0.1,0.4,0.8,1.2,1.8,2.4)
+for (re in reso_used) {
+  citeCells_cit <- FindClusters(citeCells_cit, verbose = FALSE,resolution=re)
+}
+```
+
+```{r}
+DimPlot(citeCells_cit,group.by = "ADT_snn_res.1.8",cols = getPalette1(nlevels(citeCells_cit$ADT_snn_res.1.8)), label=TRUE)+NoLegend()
+```
+
+```{r}
+ggsave(filename = "figs/umap_clustering_adt.pdf",width = 5,height = 5)
+```
+
+```{r,fig.height=7,fig.width=7}
+clustree(citeCells_cit, prefix = "ADT_snn_res.",show_axis = T)
+```
+
+```{r}
+pdf("figs/cluster_tree_adt.pdf")
+clustree(citeCells_cit, prefix = "ADT_snn_res.",show_axis = T)
+dev.off()
+```
+
+
+```{r}
+cal_entropy=function(x){
+  freqs <- table(x)/length(x)
+  freqs = freqs[freqs>0]
+  return(-sum(freqs * log(freqs)))
+}
+
+get_cluster_entropy = function(c_assignment_A, c_assignment_B){
+  ent = sapply(levels(c_assignment_A), function(x){cal_entropy(c_assignment_B[c_assignment_A==x])})
+  ent_per_cell = rep(0,length(c_assignment_A))
+  for (x in levels(c_assignment_A)){
+    ent_per_cell[c_assignment_A==x]=ent[x]
+  }
+  return(ent_per_cell)
+}
+```
+
+## looking at RNA heterogeneity in ADT data
+
+```{r}
+tmp_l = lapply(paste0("SCT_snn_res.",reso_used),function(x){get_cluster_entropy(citeCells_cit@meta.data[,paste0("ADT_snn_res.",reso_used[1])],citeCells_qc@meta.data[,x])})
+ent_matrix = Reduce(cbind,tmp_l)
+rownames(ent_matrix) = rownames(citeCells_cit@meta.data)
+colnames(ent_matrix) = paste0("SCT_snn_res.",reso_used)
+
+for (re in reso_used[-1]) {
+  tmp_l = lapply(paste0("SCT_snn_res.",reso_used),function(x){get_cluster_entropy(citeCells_cit@meta.data[,paste0("ADT_snn_res.",re)],citeCells_qc@meta.data[,x])})
+ent_matrix = ent_matrix+Reduce(cbind,tmp_l)
+}
+ent_matrix = ent_matrix/length(reso_used)
+ent_matrix_rna = ent_matrix
+```
+
+
+```{r}
+ct = data.frame(UMAP_dim1=citeCells_cit@reductions$umap@cell.embeddings[,1],
+                UMAP_dim2=citeCells_cit@reductions$umap@cell.embeddings[,2],
+                Entropy=rowMeans(ent_matrix_rna),
+                clusters=citeCells_cit@meta.data[,"ADT_snn_res.1.8"])
+ct_grep = ct %>% group_by(clusters) %>% summarise(UMAP_dim1=mean(UMAP_dim1),UMAP_dim2=mean(UMAP_dim2))
+ggplot()+
+  geom_point(data=ct,aes(x=UMAP_dim1,y=UMAP_dim2,col=Entropy),size=0.5,alpha=0.8)+
+  scale_color_gradientn(colours=BlueAndRed())+
+  labs(col="Entropy",title="UMAP and cluster labels on ADT")+
+  geom_text(data=ct_grep,aes(x=UMAP_dim1,y=UMAP_dim2,label=clusters))+
+  theme_bw()+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+panel.background = element_blank(), axis.line = element_line(colour = "black"))
+```
+
+```{r}
+ggsave(filename = "figs/UMAP_adt_entropy_on_rna.pdf",width = 5.5,height = 5)
+```
+
+
+## looking at ADT heterogeneity in RNA data
+
+```{r}
+tmp_l = lapply(paste0("ADT_snn_res.",reso_used),function(x){get_cluster_entropy(citeCells_qc@meta.data[,paste0("SCT_snn_res.",reso_used[1])],citeCells_cit@meta.data[,x])})
+ent_matrix = Reduce(cbind,tmp_l)
+rownames(ent_matrix) = rownames(citeCells_cit@meta.data)
+colnames(ent_matrix) = paste0("ADT_snn_res.",reso_used)
+
+for (re in reso_used[-1]) {
+  tmp_l = lapply(paste0("ADT_snn_res.",reso_used),function(x){get_cluster_entropy(citeCells_qc@meta.data[,paste0("SCT_snn_res.",re)],citeCells_cit@meta.data[,x])})
+ent_matrix = ent_matrix+Reduce(cbind,tmp_l)
+}
+ent_matrix = ent_matrix/length(reso_used)
+ent_matrix_adt = ent_matrix
+```
+
+
+```{r}
+ct = data.frame(UMAP_dim1=citeCells_qc@reductions$umap@cell.embeddings[,1],
+                UMAP_dim2=citeCells_qc@reductions$umap@cell.embeddings[,2],
+                Entropy=rowMeans(ent_matrix_adt),
+                clusters=citeCells_qc@meta.data[,"SCT_snn_res.1.2"])
+ct_grep = ct %>% group_by(clusters) %>% summarise(UMAP_dim1=mean(UMAP_dim1),UMAP_dim2=mean(UMAP_dim2))
+ggplot()+
+  geom_point(data=ct,aes(x=UMAP_dim1,y=UMAP_dim2,col=Entropy),size=0.5,alpha=0.8)+
+  scale_color_gradientn(colours=BlueAndRed())+
+  labs(col="Entropy",title="UMAP and cluster labels on RNA")+
+  geom_text(data=ct_grep,aes(x=UMAP_dim1,y=UMAP_dim2,label=clusters))+
+  theme_bw()+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+panel.background = element_blank(), axis.line = element_line(colour = "black"))
+```
+
+## use one-sense plot to visualize heterogeneity
+
+```{r}
+citeCells_cit1 = RunUMAP(citeCells_cit,dims=1:20,n.components = 1)
+citeCells_qc1 = RunUMAP(citeCells_qc,dims=1:30,n.components = 1)
+```
+
+```{r}
+ggplot(data = NULL,aes(x=citeCells_cit1@reductions$umap@cell.embeddings[,1],
+                       y=citeCells_qc1@reductions$umap@cell.embeddings[,1],col=rowMeans(ent_matrix_adt)))+
+  geom_point(size=0.5,alpha=0.6)+
+  scale_color_gradientn(colours=BlueAndRed())+
+  labs(x="UMAP on ADT",y="UMAP on RNA", col="Entropy")+
+  theme_bw()+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+panel.background = element_blank(), axis.line = element_line(colour = "black"))
+```
+
+```{r}
+ggplot(data = NULL,aes(x=citeCells_cit1@reductions$umap@cell.embeddings[,1],
+                       y=citeCells_qc1@reductions$umap@cell.embeddings[,1],col=rowMeans(ent_matrix_rna)))+
+  geom_point(size=0.5,alpha=0.6)+
+  scale_color_gradientn(colours=BlueAndRed())+
+  labs(x="UMAP on ADT",y="UMAP on RNA", col="Entropy")+
+  theme_bw()+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+panel.background = element_blank(), axis.line = element_line(colour = "black"))
+```
+
+```{r}
+ggsave("figs/1d-umap_adt_rna_entropy_on_rna.pdf",width = 5.5,height = 5)
+```
+
+
+# look at gene expression 
+
+find marker ADTs for each cluster
+```{r}
+Idents(citeCells_cit) = citeCells_cit$ADT_snn_res.1.8
+citeCells_cit.markers <- FindAllMarkers(citeCells_cit, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25,verbose = FALSE)
+```
+
+```{r,fig.height=8,fig.width=9}
+top_ge <- citeCells_cit.markers %>% group_by(cluster) %>% top_n(n = 5, wt = avg_logFC)
+tmp_mat = citeCells_cit@assays$ADT@scale.data[(top_ge$gene),]
+tmp_mat[tmp_mat>2.5] = 2.5
+tmp_mat[tmp_mat<(-2.5)] = -2.5
+
+anno_df = data.frame(clusters=Idents(citeCells_cit),
+                     log2_RNA_count=log2(citeCells_cit$nCount_RNA+1),
+                     log2_ADT_count=log2(citeCells_cit$nCount_ADT+1),
+                     number_of_genes=citeCells_cit$nFeature_RNA,stringsAsFactors = FALSE)
+getPalette = colorRampPalette(brewer.pal(9, "Set1"))
+col_clu = getPalette(nlevels(Idents(citeCells_cit)))
+names(col_clu) = as.character(0:(nlevels(Idents(citeCells_cit))-1))
+annotation_colors = list(
+  clusters=col_clu,
+  log2_RNA_count=BlueAndRed(),
+  log2_ADT_count=BlueAndRed(),
+  number_of_genes=BlueAndRed()
+)
+
+pheatmap(tmp_mat[,order(anno_df$clusters)],
+         cluster_cols = FALSE, 
+         cluster_rows = FALSE,
+         annotation_col = anno_df,
+         annotation_colors=annotation_colors,
+         show_colnames = FALSE,
+         color=PurpleAndYellow())
+```
+
+
+find marker genes for each cluster
+```{r}
+Idents(citeCells_qc) = citeCells_qc$SCT_snn_res.1.2
+citeCells_qc.markers <- FindAllMarkers(citeCells_qc, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25,verbose = FALSE)
+```
+
+```{r,fig.height=8,fig.width=8}
+top_ge <- citeCells_qc.markers %>% group_by(cluster) %>% top_n(n = 3, wt = avg_logFC)
+tmp_mat = citeCells_qc@assays$SCT@scale.data[(top_ge$gene),]
+tmp_mat[tmp_mat>2.5] = 2.5
+tmp_mat[tmp_mat<(-2.5)] = -2.5
+
+anno_df = data.frame(clusters=Idents(citeCells_qc),
+                     log2_RNA_count=log2(citeCells_qc$nCount_RNA+1),
+                     log2_ADT_count=log2(citeCells_qc$nCount_ADT+1),
+                     number_of_genes=citeCells_qc$nFeature_RNA,stringsAsFactors = FALSE)
+getPalette = colorRampPalette(brewer.pal(9, "Set1"))
+col_clu = getPalette(nlevels(Idents(citeCells_qc)))
+names(col_clu) = as.character(0:(nlevels(Idents(citeCells_qc))-1))
+annotation_colors = list(
+  clusters=col_clu,
+  log2_RNA_count=BlueAndRed(),
+  log2_ADT_count=BlueAndRed(),
+  number_of_genes=BlueAndRed()
+)
+
+pheatmap(tmp_mat[,order(anno_df$clusters)],
+         cluster_cols = FALSE, 
+         cluster_rows = FALSE,
+         annotation_col = anno_df,
+         annotation_colors=annotation_colors,
+         show_colnames = FALSE,
+         color=PurpleAndYellow())
+```
+
+looking at cluster `3` in RNA (resolution=1.2), which has more heterogeneity in ADT data
+
+```{r,fig.height=4,fig.width=6}
+citeCells_cit_sel = citeCells_cit[,Idents(citeCells_qc)=="3"]
+citeCells_cit_sel <- RunPCA(citeCells_cit_sel, features = rownames(citeCells_cit_sel), verbose = FALSE)
+citeCells_cit_sel <- FindNeighbors(citeCells_cit_sel, dims = 1:10, verbose = FALSE)
+citeCells_cit_sel <- FindClusters(citeCells_cit_sel, verbose = FALSE,resolution=0.4)
+citeCells_cit_sel.markers <- FindAllMarkers(citeCells_cit_sel, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25,verbose = FALSE)
+
+top_ge <- citeCells_cit_sel.markers  %>% filter(p_val_adj<0.05) %>% group_by(cluster) %>% top_n(n = 5, wt = avg_logFC)
+DoHeatmap(citeCells_cit_sel,features=top_ge$gene)+NoLegend()
+```
+
+
+```{r,warning=FALSE,message=FALSE}
+citeCells_cit_sel <- SCTransform(citeCells_cit_sel, assay = "RNA",variable.features.n = 500, verbose = FALSE)
+citeCells_cit_sel.rna.markers <- FindAllMarkers(citeCells_cit_sel, assay="SCT", only.pos = TRUE, min.pct = 0.15, logfc.threshold = 0.15,verbose = FALSE)
+top_ge <- citeCells_cit_sel.rna.markers %>% filter(p_val_adj<0.05) %>% group_by(cluster) %>% top_n(n = 5, wt = avg_logFC)
+DoHeatmap(citeCells_cit_sel,assay="SCT",features=top_ge$gene)
+```
+
+looking at cluster `7` in ADT (resolution=1.8), which has more heterogeneity in RNA data
+
+```{r,warning=FALSE,message=FALSE,fig.height=5,fig.width=7}
+citeCells_qc_sel = citeCells_qc[,Idents(citeCells_cit)=="7"]
+citeCells_qc_sel <- SCTransform(citeCells_qc_sel, variable.features.n = 500, verbose = FALSE)
+citeCells_qc_sel <- RunPCA(citeCells_qc_sel, verbose = FALSE)
+citeCells_qc_sel <- FindNeighbors(citeCells_qc_sel, dims = 1:10, verbose = FALSE)
+citeCells_qc_sel <- FindClusters(citeCells_qc_sel, verbose = FALSE,resolution=0.4)
+citeCells_qc_sel.markers <- FindAllMarkers(citeCells_qc_sel, only.pos = TRUE, min.pct = 0.10, logfc.threshold = 0.15,verbose = FALSE)
+RNA_clu = citeCells_qc_sel$seurat_clusters
+top_ge <- citeCells_qc_sel.markers %>% group_by(cluster) %>% top_n(n =5, wt = avg_logFC)
+DoHeatmap(citeCells_qc_sel,features=top_ge$gene)+NoLegend()
+```
+
+
+```{r}
+citeCells_qc_sel.adt.markers <- FindAllMarkers(citeCells_qc_sel, assay="ADT", only.pos = TRUE, min.pct = 0.15, logfc.threshold = 0.15,verbose = FALSE)
+top_ge <- citeCells_qc_sel.adt.markers %>% filter(p_val_adj<0.05) %>% group_by(cluster) %>% top_n(n = 5, wt = avg_logFC)
+
+DoHeatmap(citeCells_qc_sel,assay="ADT",features=c(top_ge$gene,"adt-CD69"))
+```
+
+
+```{r}
+top_ge = FindMarkers(citeCells_cit,ident.1="7",ident.2=c("0","1","2","3","4","8","10"),verbose = FALSE) 
+top_ge$gene = rownames(top_ge)
+top_ge$sign = "+"
+top_ge$sign[top_ge$avg_logFC>0] = "-"
+top_ge = top_ge %>% group_by(sign) %>% top_n(n = 7, wt = avg_logFC)
+citeCells_cit_sel = citeCells_cit[,citeCells_cit$ADT_snn_res.1.8 %in% c("0","1","2","3","4","7","8","10")]
+DoHeatmap(citeCells_cit_sel,features=top_ge$gene)+NoLegend()
+```
+
+```{r}
+pdf("figs/adt_markers_heatmap_cluster7.pdf")
+DoHeatmap(citeCells_cit_sel,raster=FALSE,features=top_ge$gene)+NoLegend()
+dev.off()
+```
+
+
+looking at cluster `11` in ADT (resolution=1.8), which has more heterogeneity in RNA data
+
+```{r,warning=FALSE,message=FALSE,fig.height=5,fig.width=7}
+citeCells_qc_sel = citeCells_qc[,citeCells_cit$ADT_snn_res.1.8=="11"]
+
+top_ge <- citeCells_qc.markers %>% filter(cluster %in% unique(as.character( citeCells_qc_sel$SCT_snn_res.1.2))) %>% group_by(cluster) %>% top_n(n = 5, wt = avg_logFC)
+DoHeatmap(citeCells_qc_sel,features=top_ge$gene)+NoLegend()
+```
+
+```{r}
+table(citeCells_cit$ADT_snn_res.1.8,citeCells_cit$ADT_snn_res.2.4)
+```
+
+```{r}
+top_ge = FindMarkers(citeCells_cit,ident.1="11",ident.2=c("5","6"),verbose = FALSE) 
+top_ge$gene = rownames(top_ge)
+top_ge$sign = "+"
+top_ge$sign[top_ge$avg_logFC>0] = "-"
+top_ge = top_ge %>% group_by(sign) %>% top_n(n = 10, wt = avg_logFC)
+citeCells_cit_sel = citeCells_cit[,citeCells_cit$ADT_snn_res.1.8 %in% c("5","6","11")]
+DoHeatmap(citeCells_cit_sel,features=top_ge$gene)+NoLegend()
+```
+
+```{r}
+pdf("figs/adt_markers_heatmap_cluster11.pdf")
+DoHeatmap(citeCells_cit_sel,raster=FALSE,features=top_ge$gene)+NoLegend()
+dev.off()
+```
+
+
+```{r}
+top_ge = FindMarkers(citeCells_cit, assay="SCT", ident.1="11",ident.2=c("5","6"), verbose = FALSE) 
+top_ge$gene = rownames(top_ge)
+top_ge$sign = "-"
+top_ge$sign[top_ge$avg_logFC>0] = "+"
+top_ge = top_ge %>% group_by(sign) %>% top_n(n = 5, wt = avg_logFC)
+citeCells_cit_sel = citeCells_cit[,citeCells_cit$ADT_snn_res.1.8 %in% c("5","6","11")]
+DoHeatmap(citeCells_cit_sel, assay = "SCT", features=top_ge$gene)+NoLegend()
+```
+
+

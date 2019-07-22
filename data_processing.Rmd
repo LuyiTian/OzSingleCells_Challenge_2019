@@ -1,0 +1,249 @@
+---
+title: "OZsinglecell 2019 computational challenge - CITE-seq data processing"
+output: html_notebook
+author: Luyi Tian
+---
+
+```{r,warning=FALSE,message=FALSE}
+library(Seurat)
+library(ggplot2)
+library(pheatmap)
+library(umap)
+library(dplyr)
+library(GGally)
+library(ggExtra)
+library(RColorBrewer)
+getPalette = colorRampPalette(brewer.pal(9, "Set1"))
+load("data/Swarbrick_metastatic_lymphnode.seurat.Rdata")
+```
+
+# Data exploration
+
+
+```{r}
+head(citeCells@meta.data)
+```
+
+# quality control
+
+```{r}
+citeCells$MT_count <- colSums(as.matrix(citeCells@assays$RNA@counts[grepl("mt-",rownames(citeCells@assays$RNA@counts)) | grepl("MT-",rownames(citeCells@assays$RNA@counts)),]))
+citeCells$MT_count = citeCells$MT_count/citeCells$nCount_RNA
+citeCells$mouse_RNA_count = colSums(as.matrix(citeCells@assays$RNA@counts[grepl("mm10",rownames(citeCells@assays$RNA@counts)),]))
+citeCells$human_RNA_count = colSums(as.matrix(citeCells@assays$RNA@counts[grepl("GRCh38",rownames(citeCells@assays$RNA@counts)),]))
+```
+
+```{r}
+ggplot(data=NULL,aes(x=log2(citeCells$mouse_RNA_count +1),y=log2(citeCells$human_RNA_count+1),col=log2(citeCells$nCount_ADT+1)))+
+  geom_point()+
+  geom_abline(intercept = 3.8, slope = 1.4, color="red", 
+                 linetype="dashed", size=1.5)+
+  labs(x="mouse RNA count",y="human RNA count",col="log2 ADT_count")+
+  theme_bw()+
+  theme(text=element_text(size=15),legend.position="top")
+```
+
+```{r}
+ggsave(filename = "figs/QC_mouseVShuman.pdf",width = 5.5,height = 6)
+```
+
+
+```{r,warning=FALSE,message=FALSE,fig.width=8,fig.height=8}
+QC_matrix = citeCells@meta.data[,c("nCount_RNA","mouse_RNA_count","human_RNA_count","nCount_ADT","MT_count")]
+QC_matrix[,c("nCount_RNA", "mouse_RNA_count", "human_RNA_count", "nCount_ADT")] = log2(QC_matrix[,c("nCount_RNA", "mouse_RNA_count", "human_RNA_count", "nCount_ADT")]+1)
+
+ggpairs(QC_matrix)+
+  theme_bw()
+```
+
+```{r}
+ggsave(filename = "figs/QC_matrix_pairs.pdf")
+```
+
+
+```{r}
+kp1 = QC_matrix$human_RNA_count-(1.4*QC_matrix$mouse_RNA_count)-3.8>0
+kp2 = QC_matrix$MT_count<0.15
+kp3 = QC_matrix$nCount_ADT>8
+kp4 = QC_matrix$human_RNA_count>8
+QC_matrix$cell_keep = FALSE
+QC_matrix$cell_keep[kp1 & kp2 & kp3] = TRUE
+```
+
+```{r,warning=FALSE,message=FALSE,fig.width=8,fig.height=8}
+ggpairs(
+      QC_matrix,
+      mapping = ggplot2::aes_string(colour = "cell_keep")
+    )+
+  theme_bw()
+```
+
+```{r}
+ggsave(filename = "figs/QC_matrix_pairs_col.pdf")
+```
+
+
+```{r,warning=FALSE,message=FALSE}
+citeCells_qc = citeCells[,QC_matrix$cell_keep]
+RNA_mtx = as.matrix(citeCells_qc@assays$RNA@counts)
+RNA_mtx = RNA_mtx[grepl("GRCh38-",rownames(RNA_mtx)),]
+rownames(RNA_mtx) = substring(rownames(RNA_mtx),8)
+
+RNA_mtx = RNA_mtx[!grepl("RPL",rownames(RNA_mtx)),]
+RNA_mtx = RNA_mtx[!grepl("RPS",rownames(RNA_mtx)),]
+
+ADT_mtx = as.matrix(citeCells_qc@assays$ADT@counts)
+rownames(ADT_mtx) = paste0("adt-",rownames(ADT_mtx))
+
+citeCells_qc <- CreateSeuratObject(counts = RNA_mtx)
+citeCells_qc[["ADT"]] <- CreateAssayObject(counts = ADT_mtx)
+citeCells_qc <- NormalizeData(citeCells_qc, assay = "ADT", normalization.method = "CLR",verbose=FALSE)
+citeCells_qc <- ScaleData(citeCells_qc, assay = "ADT",verbose=FALSE)
+```
+
+
+```{r,warning=FALSE,message=FALSE}
+citeCells_qc <- SCTransform(citeCells_qc, variable.features.n = 5000, verbose = FALSE)
+citeCells_qc <- RunPCA(citeCells_qc, verbose = FALSE)
+citeCells_qc <- RunUMAP(citeCells_qc, dims = 1:30, verbose = FALSE)
+citeCells_qc <- FindNeighbors(citeCells_qc, dims = 1:30, verbose = FALSE)
+citeCells_qc <- FindClusters(citeCells_qc, verbose = FALSE)
+```
+
+```{r}
+DimPlot(citeCells_qc, label = TRUE,cols=getPalette(nlevels(citeCells_qc$seurat_clusters))) + NoLegend()
+```
+
+
+```{r}
+citeCells_qc.markers <- FindAllMarkers(citeCells_qc, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25,verbose = FALSE)
+```
+
+```{r,fig.width=8,fig.height=10}
+top10 <- citeCells_qc.markers %>% group_by(cluster) %>% top_n(n = 5, wt = avg_logFC)
+tmp_mat = citeCells_qc@assays$SCT@scale.data[(top10$gene),]
+tmp_mat[tmp_mat>2.5] = 2.5
+tmp_mat[tmp_mat<(-2.5)] = -2.5
+
+anno_df = data.frame(clusters=citeCells_qc$seurat_clusters,
+                     log2_RNA_count=log2(citeCells_qc$nCount_RNA+1),
+                     log2_ADT_count=log2(citeCells_qc$nCount_ADT+1),
+                     number_of_genes=citeCells_qc$nFeature_RNA,stringsAsFactors = FALSE)
+getPalette = colorRampPalette(brewer.pal(9, "Set1"))
+col_clu = getPalette(nlevels(citeCells_qc$seurat_clusters))
+names(col_clu) = as.character(0:(nlevels(citeCells_qc$seurat_clusters)-1))
+annotation_colors = list(
+  clusters=col_clu,
+  log2_RNA_count=BlueAndRed(),
+  log2_ADT_count=BlueAndRed(),
+  number_of_genes=BlueAndRed()
+)
+
+pheatmap(tmp_mat[,order(anno_df$clusters)],
+         cluster_cols = FALSE, 
+         cluster_rows = FALSE,
+         annotation_col = anno_df,
+         annotation_colors=annotation_colors,
+         show_colnames = FALSE,
+         color=PurpleAndYellow())
+```
+
+remove cluster 9 as it might be doublet or empty droplet.
+
+```{r}
+citeCells_qc = subset(citeCells_qc,idents = '9', invert = TRUE)
+citeCells_qc <- RunPCA(citeCells_qc, verbose = FALSE)
+citeCells_qc <- RunUMAP(citeCells_qc, dims = 1:30, verbose = FALSE)
+citeCells_qc <- FindNeighbors(citeCells_qc, dims = 1:30, verbose = FALSE)
+citeCells_qc <- FindClusters(citeCells_qc, verbose = FALSE)
+```
+
+```{r}
+DimPlot(citeCells_qc, label = TRUE,cols=getPalette(nlevels(citeCells_qc$seurat_clusters))) + NoLegend()
+```
+
+
+```{r}
+citeCells_cit = citeCells_qc
+citeCells_cit$RNA_clusters = citeCells_cit$seurat_clusters
+DefaultAssay(citeCells_cit) <- "ADT"
+citeCells_cit <- RunPCA(citeCells_cit, features = rownames(citeCells_cit),verbose = FALSE)
+```
+
+```{r}
+citeCells_cit <- RunUMAP(citeCells_cit,dim=1:20 , assay = "ADT")
+citeCells_cit <- FindNeighbors(citeCells_cit)
+citeCells_cit <- FindClusters(citeCells_cit, verbose = FALSE)
+```
+
+
+```{r}
+DimPlot(citeCells_cit,reduction="umap",label = TRUE,cols=getPalette(nlevels(citeCells_cit$seurat_clusters)))+NoLegend()
+```
+
+```{r}
+clustering.table <- table(Idents(citeCells_cit), citeCells_cit$RNA_clusters)
+clustering.table
+```
+
+
+```{r}
+citeCells_cit.markers <- FindAllMarkers(citeCells_cit, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25,verbose = FALSE)
+```
+
+```{r,fig.width=9,fig.height=10}
+top10 <- citeCells_cit.markers %>% group_by(cluster) %>% top_n(n = 5, wt = avg_logFC)
+tmp_mat = citeCells_cit@assays$ADT@scale.data[(top10$gene),]
+tmp_mat[tmp_mat>2.5] = 2.5
+tmp_mat[tmp_mat<(-2.5)] = -2.5
+
+anno_df = data.frame(clusters=citeCells_cit$seurat_clusters,
+                     log2_RNA_count=log2(citeCells_cit$nCount_RNA+1),
+                     log2_ADT_count=log2(citeCells_cit$nCount_ADT+1),
+                     number_of_genes=citeCells_cit$nFeature_RNA,stringsAsFactors = FALSE)
+getPalette = colorRampPalette(brewer.pal(9, "Set1"))
+col_clu = getPalette(nlevels(citeCells_cit$seurat_clusters))
+names(col_clu) = as.character(0:(nlevels(citeCells_cit$seurat_clusters)-1))
+annotation_colors = list(
+  clusters=col_clu,
+  log2_RNA_count=BlueAndRed(),
+  log2_ADT_count=BlueAndRed(),
+  number_of_genes=BlueAndRed()
+)
+
+pheatmap(tmp_mat[,order(anno_df$clusters)],
+         cluster_cols = FALSE, 
+         cluster_rows = FALSE,
+         annotation_col = anno_df,
+         annotation_colors=annotation_colors,
+         show_colnames = FALSE,
+         color=PurpleAndYellow())
+```
+
+remove cluster `9` as it have very low ADT counts and smaller number of genes detected.
+
+```{r}
+citeCells_cit = subset(citeCells_cit,idents = '9', invert = TRUE)
+citeCells_cit <- RunPCA(citeCells_cit, features = rownames(citeCells_cit),verbose = FALSE)
+citeCells_cit <- RunUMAP(citeCells_cit, dims = 1:20, verbose = FALSE)
+citeCells_cit <- FindNeighbors(citeCells_cit, dims = 1:20, verbose = FALSE)
+citeCells_cit <- FindClusters(citeCells_cit, verbose = FALSE)
+```
+
+
+```{r}
+DimPlot(citeCells_cit,reduction="umap",label = TRUE,cols=getPalette(nlevels(citeCells_cit$seurat_clusters)))+NoLegend()
+```
+
+```{r}
+citeCells_qc = citeCells_qc[,colnames(citeCells_qc) %in% colnames(citeCells_cit)]
+
+saveRDS(citeCells_qc, file="data/citeCells_qc.Rds")
+```
+
+
+```{r}
+sessionInfo()
+```
+
+
